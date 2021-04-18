@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+
+# As the paranoid persion I want to backup all state and status files before going forward.
+# Without removing them the terraform init sometimes fails
+old_states=$(ls *.tfstate2 2>/dev/null)
+if [ -a .terraform ] || [ "$old_states" != "" ]; then
+    backupdir="backup/tf-$(date +'%Y-%m-%d-%H-%M-%S')"
+    echo "Backing up the old state files and settings to $backupdir"
+    mkdir -p $backupdir
+    mv -f .terraform $backupdir 2>/dev/null
+    mv -f *.tfstate $backupdir 2>/dev/null
+fi
+
+key="${1:-default}"
+# Tries to guess the correct region. This is probably the biggest limitation
+# and risk at this 
+region=${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region)}}
+
+if [ "$region" == "" ]; then
+    echo 'Region is empty! You have to define the region at one of the following environment variables:'
+    echo 'AWS_REGION or AWS_DEFAULT_REGION or at the aws cli configuration file'
+    exit 1
+fi
+
+account_alias=$( aws iam list-account-aliases --query 'AccountAliases[0]' --output text )
+
+if [ "$account_alias" == "" ]; then
+    echo 'Account alias must be set. It can be done with the command:'
+    echo 'aws iam create-account-alias --account-alias <alias>'
+    exit 1
+fi
+
+cleaned_up_alias=$( echo $account_alias | tr -c -d "[:alnum:]" )
+
+tempkey=TF_S3_BACKEND_SECRET_KEY_$cleaned_up_alias
+
+# If the tf-workspace-name -file exists, it is used for the dirctory. Otherwise
+# it's the last part of the current directory
+if [ -a tf-workspace-name ]; then
+    directory=$( cat tf-workspace-name | tr -c -d "[:alnum:]" )
+else
+    directory=$( basename $PWD )
+fi
+
+secretkey=${!tempkey:-${TF_S3_BACKEND_SECRET_KEY:-""}}
+
+bucketname=$account_alias-tf-status${secretkey}
+keypath=tf/$region/$account_alias/$directory/$key
+bucket_region=$( aws s3api get-bucket-location --bucket $bucketname --output text )
+
+terraform init -backend-config="bucket=$bucketname" \
+    -backend-config="key=$keypath" \
+    -backend-config="region=$bucket_region"
